@@ -9,7 +9,7 @@ import os
 # -----------------------------
 # CONFIG (Environment Variable)
 # -----------------------------
-API_KEY = "AIzaSyD15dvqME2_4Gkhw-DhEmParKnIWBCpLcQ"
+API_KEY = "??"
 
 if not API_KEY:
     raise ValueError("❌ API Key missing! Set GOOGLE_MAPS_API_KEY in environment variables.")
