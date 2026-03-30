@@ -62,7 +62,7 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
-@app.post("/love")
+@app.post("/login")
 def login(data: LoginRequest):
     # Dummy user (replace with DB later)
     if data.username == "admin" and data.password == "admin123":
