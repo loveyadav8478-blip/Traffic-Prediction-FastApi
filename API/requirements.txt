@@ -5,3 +5,4 @@ joblib
 xgboost
 googlemaps
 python-dotenv
+PyJWT
