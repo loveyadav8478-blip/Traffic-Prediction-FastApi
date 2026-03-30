@@ -18,13 +18,13 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY")
 JWT_SECRET = os.getenv("JWT_SECRET")
 
 if not GOOGLE_API_KEY:
-    raise ValueError("Missing GOOGLE_MAPS_API_KEY")
+    print("Missing GOOGLE_MAPS_API_KEY")
 
 if not API_SECRET_KEY:
-    raise ValueError("Missing API_SECRET_KEY")
+    print("Missing API_SECRET_KEY")
 
 if not JWT_SECRET:
-    raise ValueError("Missing JWT_SECRET")
+    print("Missing JWT_SECRET")
 
 # FASTAPI INIT (Docs hidden)
 app = FastAPI(
