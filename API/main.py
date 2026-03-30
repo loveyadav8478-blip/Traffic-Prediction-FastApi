@@ -10,13 +10,11 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import jwt
 
-# -----------------------------
 # LOAD ENV
-# -----------------------------
 load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-API_SECRET_KEY = os.getenv("API_SECRET_KEY")  # for API key protection
+API_SECRET_KEY = os.getenv("API_SECRET_KEY")
 JWT_SECRET = os.getenv("JWT_SECRET")
 
 if not GOOGLE_API_KEY:
@@ -28,36 +26,28 @@ if not API_SECRET_KEY:
 if not JWT_SECRET:
     raise ValueError("Missing JWT_SECRET")
 
-# -----------------------------
 # FASTAPI INIT (Docs hidden)
-# -----------------------------
 app = FastAPI(
     title="Traffic Route Prediction API 🚗",
     docs_url=None,
     redoc_url=None
 )
 
-# -----------------------------
 # LOAD MODEL
-# -----------------------------
 model = joblib.load("model_XG.pkl")
 columns = joblib.load("columns.pkl")
 
-# -----------------------------
 # GOOGLE MAPS CLIENT
-# -----------------------------
 gmaps = googlemaps.Client(key=GOOGLE_API_KEY)
 
-# -----------------------------
 # SECURITY
-# -----------------------------
 
-# 🔐 API KEY CHECK
+#API KEY CHECK
 def verify_api_key(x_api_key: str = Header(...)):
     if x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
 
-# 🔐 JWT CHECK
+#JWT CHECK
 security = HTTPBearer()
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -67,14 +57,12 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     except:
         raise HTTPException(status_code=401, detail="Invalid Token")
 
-# -----------------------------
-# AUTH ROUTES
-# -----------------------------
+#AUTH ROUTES
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-@app.post("/login")
+@app.post("/love")
 def login(data: LoginRequest):
     # Dummy user (replace with DB later)
     if data.username == "admin" and data.password == "admin123":
@@ -87,16 +75,12 @@ def login(data: LoginRequest):
 
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
-# -----------------------------
 # INPUT SCHEMA
-# -----------------------------
 class RouteInput(BaseModel):
     source: str
     destination: str
 
-# -----------------------------
 # HELPER FUNCTIONS
-# -----------------------------
 def get_features():
     now = datetime.datetime.now()
 
@@ -127,9 +111,7 @@ def real_traffic_level(factor):
     else:
         return 2
 
-# -----------------------------
 # MAIN ROUTE (PROTECTED 🔒)
-# -----------------------------
 @app.post("/predict-route")
 def predict_route(
     data: RouteInput,
