@@ -2,7 +2,6 @@
 venv/
 __pycache__/
 *.pyc
-*.pkl
 .vscode/
 .DS_Store
 Thumb.db
