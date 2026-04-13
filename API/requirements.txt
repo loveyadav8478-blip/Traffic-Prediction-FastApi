@@ -1,8 +1,12 @@
-fastapi
-uvicorn
 pandas
 joblib
 xgboost
 googlemaps
+fastapi
+uvicorn
 python-dotenv
 PyJWT
+scikit-learn
+numpy
+pydantic
+uvicorn

@@ -1,196 +1,114 @@
 import os
-import datetime
-import pandas as pd
-import joblib
-import googlemaps
-
-from fastapi import FastAPI, HTTPException, Depends, Header
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+import logging
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
+import datetime
+from fastapi import HTTPException, Depends, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 
-# LOAD ENV
 load_dotenv()
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-API_SECRET_KEY = os.getenv("API_SECRET_KEY")
 JWT_SECRET = os.getenv("JWT_SECRET")
+API_SECRET_KEY = os.getenv("API_SECRET_KEY")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
-if not GOOGLE_API_KEY:
-    print("Missing GOOGLE_MAPS_API_KEY")
+from auth import (
+    create_token, verify_api_key, verify_token,
+    ADMIN_USERNAME, ADMIN_PASSWORD
+)
+from predictor import predict
 
-if not API_SECRET_KEY:
-    print("Missing API_SECRET_KEY")
+#Startup
+load_dotenv()
 
-if not JWT_SECRET:
-    print("Missing JWT_SECRET")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# FASTAPI INIT (Docs hidden)
+_required = {"API_SECRET_KEY", "JWT_SECRET", "ADMIN_PASSWORD"}
+_missing = [k for k in _required if not os.getenv(k)]
+if _missing:
+    raise RuntimeError(f"❌ Missing required env vars: {_missing}")
+
 app = FastAPI(
-    title="Traffic Route Prediction API 🚗",
-    docs_url=None,
-    redoc_url=None
+    title="Traffic Prediction API",
+    version="1.0.0",
+    docs_url="/docs",       # Swagger UI
+    redoc_url="/redoc"
 )
 
-# LOAD MODEL
-model = joblib.load("model_XG.pkl")
-columns = joblib.load("columns.pkl")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# GOOGLE MAPS CLIENT
-gmaps = googlemaps.Client(key=GOOGLE_API_KEY)
 
-# SECURITY
+#Schemas
 
-#API KEY CHECK
-def verify_api_key(x_api_key: str = Header(...)):
-    if x_api_key != API_SECRET_KEY:
-        raise HTTPException(status_code=401, detail="Invalid API Key")
-
-#JWT CHECK
-security = HTTPBearer()
-
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=["HS256"])
-        return payload
-    except:
-        raise HTTPException(status_code=401, detail="Invalid Token")
-
-#AUTH ROUTES
 class LoginRequest(BaseModel):
     username: str
     password: str
 
+
+# models.py or inside main.py
+class RouteInput(BaseModel):
+    source      : str
+    destination : str
+    weather     : str   = "Clouds"   # optional — default Clouds
+    holiday     : str   = "No Holiday"
+    temp_cel    : float = 25.0
+
+    @field_validator("source", "destination")
+    @classmethod
+    def not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Field cannot be empty")
+        return v.strip()
+
+
+#Endpoints
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "traffic-prediction-api"}
+
+
 @app.post("/login")
 def login(data: LoginRequest):
-    # Dummy user (replace with DB later)
-    if data.username == "admin" and data.password == "admin123":
-        payload = {
-            "sub": data.username,
-            "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)
-        }
-        token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-        return {"access_token": token}
+    if data.username != ADMIN_USERNAME or data.password != ADMIN_PASSWORD:
+        logger.warning("Failed login attempt for user: %s", data.username)
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    raise HTTPException(status_code=401, detail="Invalid credentials")
-
-# INPUT SCHEMA
-class RouteInput(BaseModel):
-    source: str
-    destination: str
-
-# HELPER FUNCTIONS
-def get_features():
-    now = datetime.datetime.now()
-
-    hour = now.hour
-    day_of_week = now.weekday()
-    month = now.month
-
-    is_peak_hour = 1 if (7 <= hour <= 10 or 16 <= hour <= 19) else 0
-    is_weekend = 1 if day_of_week >= 5 else 0
-
-    if month in [12, 1, 2]:
-        season = 0
-    elif month in [3, 4, 5]:
-        season = 1
-    elif month in [6, 7, 8]:
-        season = 2
-    else:
-        season = 3
-
-    return hour, day_of_week, is_peak_hour, is_weekend, season
+    token = create_token(data.username)
+    return {"access_token": token, "token_type": "Bearer"}
 
 
-def real_traffic_level(factor):
-    if factor < 1.2:
-        return 0
-    elif factor < 1.5:
-        return 1
-    else:
-        return 2
-
-# MAIN ROUTE (PROTECTED 🔒)
 @app.post("/predict-route")
 def predict_route(
-    data: RouteInput,
-    api_key: str = Depends(verify_api_key),
-    user=Depends(verify_token)
+    data     : RouteInput,
+    api_key  : str  = Depends(verify_api_key),
+    user     : dict = Depends(verify_token)
 ):
-    try:
-        routes = gmaps.directions(
-            data.source,
-            data.destination,
-            mode="driving",
-            alternatives=True,
-            departure_time=datetime.datetime.now()
-        )
+    logger.info("Prediction | user=%s | %s → %s",
+                user.get("sub"), data.source, data.destination)
 
-        if not routes:
-            raise HTTPException(status_code=404, detail="No routes found")
+    result = predict(
+        source      = data.source,
+        destination = data.destination,
+        weather     = data.weather,
+        holiday     = data.holiday,
+        temp_cel    = data.temp_cel
+    )
 
-        results = []
-
-        for i, route in enumerate(routes):
-            leg = route['legs'][0]
-
-            duration = leg['duration']['value']
-            duration_in_traffic = leg.get('duration_in_traffic', {}).get('value', duration)
-            distance = leg['distance']['value']
-
-            traffic_factor = duration_in_traffic / duration
-            real_pred = real_traffic_level(traffic_factor)
-
-            hour, day_of_week, is_peak_hour, is_weekend, season = get_features()
-
-            df = pd.DataFrame([{
-                "temp": 25,
-                "rain_1h": 0,
-                "snow_1h": 0,
-                "clouds_all": 40,
-                "year": datetime.datetime.now().year,
-                "month": datetime.datetime.now().month,
-                "day": datetime.datetime.now().day,
-                "hour": hour,
-                "minute": 0,
-                "day_of_week": day_of_week,
-                "is_peak_hour": is_peak_hour,
-                "is_weekend": is_weekend,
-                "season": season
-            }])
-
-            for col in columns:
-                if col not in df.columns:
-                    df[col] = 0
-
-            df = df[columns]
-
-            ml_pred = int(model.predict(df)[0])
-            proba = model.predict_proba(df)[0]
-            confidence = float(max(proba))
-
-            final_pred = max(ml_pred, real_pred)
-            score = duration_in_traffic * (final_pred + 1)
-
-            results.append({
-                "route_id": i,
-                "distance_km": round(distance / 1000, 2),
-                "duration_min": round(duration / 60, 2),
-                "real_duration_min": round(duration_in_traffic / 60, 2),
-                "traffic_factor": round(traffic_factor, 2),
-                "final_prediction": final_pred,
-                "confidence": confidence,
-                "score": score
-            })
-
-        best_route = min(results, key=lambda x: x["score"])
-
-        return {
-            "user": user["sub"],
-            "best_route": best_route,
-            "all_routes": results
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "user"        : user.get("sub"),
+        "source"      : data.source,
+        "destination" : data.destination,
+        "best_route"  : result
+    }
