@@ -1,240 +1,289 @@
+"""
+predictor.py — Routex Indian Traffic Prediction Engine v2
+Replaces original predictor.py — auth.py and .env unchanged
+"""
 import os
+import logging
+import requests
 import joblib
-import numpy as np
 import pandas as pd
+import numpy as np
 from datetime import datetime
-from dotenv import load_dotenv
+from typing import Optional
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-MODEL_PATH   = "model_XG.pkl"
-COLUMNS_PATH = "columns.pkl"
+# ── Load model ─────────────────────────────────────────────
+print("🔄 Loading Routex Indian traffic model...")
+model        = joblib.load(os.path.join(BASE_DIR, 'india_traffic_model.pkl'))
+feature_cols = joblib.load(os.path.join(BASE_DIR, 'feature_columns.pkl'))
+print(f"✅ Model loaded — {len(feature_cols)} features")
 
-TRAFFIC_LABELS = {0: "Low", 1: "Medium", 2: "High"}
-AVG_SPEED_KMH  = {0: 80.0,  1: 50.0,    2: 25.0}
-
-ALL_HOLIDAYS = [
-    "Columbus Day", "Independence Day", "Labor Day",
-    "Martin Luther King Jr Day", "Memorial Day", "New Years Day",
-    "No Holiday", "State Fair", "Thanksgiving Day",
-    "Veterans Day", "Washingtons Birthday"
-]
-
-ALL_WEATHER = [
-    "Clouds", "Drizzle", "Fog", "Haze", "Mist",
-    "Rain", "Smoke", "Snow", "Squall", "Thunderstorm"
-]
-
-# Cities the model was trained on (one-hot)
-ALL_CITIES = ["Chennai", "Delhi", "Hyderabad", "Mumbai"]
-
-# ─────────────────────────────────────────────────────────────
-# LOAD MODEL + COLUMNS
-# ─────────────────────────────────────────────────────────────
-
-def _load():
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(f"❌ '{MODEL_PATH}' not found.")
-    if not os.path.exists(COLUMNS_PATH):
-        raise FileNotFoundError(f"❌ '{COLUMNS_PATH}' not found.")
-
-    model   = joblib.load(MODEL_PATH)
-    columns = joblib.load(COLUMNS_PATH)
-
-    # ── Strip any target/leakage columns that snuck into columns.pkl ──
-    # These were in training data but should NEVER be fed as features
-    BAD_COLUMNS = {"traffic_level", "traffic_volume"}
-    columns = [c for c in columns if c not in BAD_COLUMNS]
-
-    print(f"✅ XGBoost model loaded. Using {len(columns)} features.")
-    print(f"   Columns: {columns}")
-    return model, columns
-
-_model, _columns = _load()
-
-
-# ─────────────────────────────────────────────────────────────
-# KNOWN DISTANCES (Indian cities) — km
-# ─────────────────────────────────────────────────────────────
-
-KNOWN_DISTANCES = {
-    frozenset(["delhi",     "agra"])       : 233,
-    frozenset(["delhi",     "jaipur"])     : 281,
-    frozenset(["delhi",     "mumbai"])     : 1415,
-    frozenset(["mumbai",    "pune"])       : 149,
-    frozenset(["bangalore", "mysore"])     : 145,
-    frozenset(["chennai",   "bangalore"])  : 346,
-    frozenset(["delhi",     "chandigarh"]) : 274,
-    frozenset(["agra",      "firozabad"])  : 40,
-    frozenset(["delhi",     "firozabad"])  : 198,
-    frozenset(["agra",      "lucknow"])    : 331,
-    frozenset(["mumbai",    "nashik"])     : 167,
-    frozenset(["delhi",     "lucknow"])    : 555,
-    frozenset(["hyderabad", "bangalore"])  : 569,
-    frozenset(["delhi",     "noida"])      : 20,
-    frozenset(["delhi",     "ghaziabad"])  : 28,
-    frozenset(["noida",     "ghaziabad"])  : 15,
-    frozenset(["delhi",     "meerut"])     : 70,
-    frozenset(["mumbai",    "hyderabad"])  : 711,
-    frozenset(["chennai",   "hyderabad"])  : 626,
-    frozenset(["delhi",     "kolkata"])    : 1472,
-    frozenset(["mumbai",    "chennai"])    : 1335,
+# ── City mapping (40+ Indian cities → model cities) ────────
+CITY_MAP = {
+    # Delhi NCR
+    "delhi": "Delhi", "new delhi": "Delhi", "ghaziabad": "Delhi",
+    "noida": "Delhi", "faridabad": "Delhi", "gurugram": "Delhi",
+    "gurgaon": "Delhi", "meerut": "Delhi", "sonipat": "Delhi",
+    "rohtak": "Delhi", "panipat": "Delhi", "hapur": "Delhi",
+    # UP
+    "agra": "Agra", "mathura": "Agra", "firozabad": "Agra",
+    "tundla": "Agra", "etawah": "Agra", "mainpuri": "Agra",
+    "kanpur": "Lucknow", "lucknow": "Lucknow", "unnao": "Lucknow",
+    "varanasi": "Lucknow", "prayagraj": "Lucknow", "allahabad": "Lucknow",
+    "gorakhpur": "Lucknow", "bareilly": "Lucknow", "aligarh": "Agra",
+    # Rajasthan
+    "jaipur": "Jaipur", "jodhpur": "Jaipur", "udaipur": "Jaipur",
+    "kota": "Jaipur", "ajmer": "Jaipur", "bikaner": "Jaipur",
+    "alwar": "Jaipur", "bharatpur": "Jaipur",
+    # Maharashtra
+    "mumbai": "Mumbai", "thane": "Mumbai", "navi mumbai": "Mumbai",
+    "kalyan": "Mumbai", "vasai": "Mumbai",
+    "pune": "Pune", "nashik": "Pune", "aurangabad": "Pune",
+    "solapur": "Pune", "kolhapur": "Pune",
+    # South
+    "bangalore": "Bangalore", "bengaluru": "Bangalore",
+    "mysore": "Bangalore", "mysuru": "Bangalore",
+    "mangalore": "Bangalore", "hubli": "Bangalore",
+    "hyderabad": "Hyderabad", "secunderabad": "Hyderabad",
+    "warangal": "Hyderabad", "vijayawada": "Hyderabad",
+    "visakhapatnam": "Hyderabad", "vizag": "Hyderabad",
+    "chennai": "Chennai", "coimbatore": "Chennai",
+    "madurai": "Chennai", "trichy": "Chennai",
+    "salem": "Chennai", "tirunelveli": "Chennai",
+    # East
+    "kolkata": "Kolkata", "howrah": "Kolkata", "durgapur": "Kolkata",
+    "patna": "Kolkata", "bhubaneswar": "Kolkata", "cuttack": "Kolkata",
+    "ranchi": "Kolkata", "jamshedpur": "Kolkata",
+    # Others
+    "chandigarh": "Delhi", "ludhiana": "Delhi", "amritsar": "Delhi",
+    "surat": "Mumbai", "vadodara": "Mumbai", "ahmedabad": "Mumbai",
+    "bhopal": "Lucknow", "indore": "Pune", "nagpur": "Pune",
+    "guwahati": "Kolkata", "siliguri": "Kolkata",
 }
 
-def estimate_distance(source: str, destination: str) -> float:
-    key = frozenset([source.lower().strip(), destination.lower().strip()])
-    if key in KNOWN_DISTANCES:
-        return float(KNOWN_DISTANCES[key])
-    src_val  = sum(ord(c) for c in source.lower())
-    dst_val  = sum(ord(c) for c in destination.lower())
-    distance = abs(src_val - dst_val) * 1.8 + len(source) * 4.5
-    return round(min(max(distance, 20), 800), 1)
+# ── Weather mapping ────────────────────────────────────────
+WEATHER_MAP = {
+    "clear": "Clear", "sunny": "Clear", "hot": "Clear",
+    "cloudy": "Clouds", "clouds": "Clouds", "overcast": "Clouds",
+    "partly cloudy": "Clouds", "windy": "Clouds",
+    "rainy": "Rain", "rain": "Rain", "raining": "Rain",
+    "drizzle": "Drizzle", "light rain": "Drizzle",
+    "fog": "Fog", "foggy": "Fog",
+    "haze": "Haze", "hazy": "Haze",
+    "mist": "Mist", "misty": "Mist",
+    "thunderstorm": "Thunderstorm", "thunder": "Thunderstorm",
+    "storm": "Thunderstorm", "lightning": "Thunderstorm",
+    "smoke": "Smoke", "smog": "Smoke", "pollution": "Smoke",
+    "snowy": "Clear", "snow": "Clear",
+    "sandstorm": "Haze", "dust": "Haze",
+}
+
+# ── Indian holidays ────────────────────────────────────────
+INDIAN_HOLIDAYS = {
+    (1, 1):  "New Years Day",
+    (1, 26): "Republic Day",
+    (8, 15): "Independence Day",
+    (10, 2): "Dussehra",
+    (12, 25): "Christmas",
+}
+
+# Festival season months — higher base probability
+FESTIVAL_MONTHS = {10, 11}  # Oct-Nov: Navratri, Dussehra, Diwali, Eid
 
 
-def _detect_city(source: str, destination: str) -> str:
-    """Map source/destination to one of the 4 trained cities."""
-    src = source.lower().strip()
-    dst = destination.lower().strip()
-
-    city_map = {
-        "delhi": "Delhi", "noida": "Delhi", "ghaziabad": "Delhi",
-        "gurugram": "Delhi", "gurgaon": "Delhi", "faridabad": "Delhi",
-        "mumbai": "Mumbai", "pune": "Mumbai", "nashik": "Mumbai",
-        "thane": "Mumbai", "navi mumbai": "Mumbai",
-        "chennai": "Chennai", "coimbatore": "Chennai",
-        "madurai": "Chennai", "trichy": "Chennai",
-        "hyderabad": "Hyderabad", "secunderabad": "Hyderabad",
-        "bangalore": "Hyderabad", "bengaluru": "Hyderabad",
-    }
-
-    return city_map.get(src) or city_map.get(dst) or "Delhi"
+def map_city(name: str) -> str:
+    return CITY_MAP.get((name or "").lower().strip(), "Delhi")
 
 
-# ─────────────────────────────────────────────────────────────
-# BUILD FEATURE ROW — matches columns.pkl exactly (43 features)
-# ─────────────────────────────────────────────────────────────
+def map_weather(w: str) -> str:
+    return WEATHER_MAP.get((w or "").lower().strip(), "Clear")
 
-def _build_features(
-    now:        datetime,
-    source:     str   = "Delhi",
-    destination:str   = "Agra",
-    weather:    str   = "Clouds",
-    holiday:    str   = "No Holiday",
-    temp_cel:   float = 25.0,
-    rain_1h:    float = 0.0,
-    snow_1h:    float = 0.0,
-    clouds_all: float = 40.0,
+
+def label_from_int(val: int) -> str:
+    return {0: "Low", 1: "Medium", 2: "High"}.get(int(val), "Low")
+
+
+def get_osrm_distance(source: str, destination: str) -> Optional[float]:
+    """Fetch real road distance via Nominatim + OSRM."""
+    try:
+        def geocode(city: str):
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": f"{city}, India", "format": "json", "limit": 1},
+                headers={"User-Agent": "Routex/2.0"},
+                timeout=6,
+            )
+            data = r.json()
+            if data:
+                return float(data[0]["lon"]), float(data[0]["lat"])
+            return None
+
+        src = geocode(source)
+        dst = geocode(destination)
+        if not src or not dst:
+            return None
+
+        r = requests.get(
+            f"https://router.project-osrm.org/route/v1/driving/"
+            f"{src[0]},{src[1]};{dst[0]},{dst[1]}",
+            params={"overview": "false"},
+            timeout=8,
+        )
+        data = r.json()
+        if data.get("code") == "Ok":
+            return round(data["routes"][0]["distance"] / 1000, 1)
+    except Exception as e:
+        logger.warning("OSRM distance fetch failed: %s", e)
+    return None
+
+
+def get_season_temp(month: int, city: str) -> float:
+    """Estimate temperature by month and city region."""
+    north = {"Delhi", "Agra", "Lucknow", "Jaipur"}
+    south = {"Chennai", "Hyderabad", "Bangalore"}
+
+    if month in [4, 5, 6]:
+        return 42.0 if city in north else 35.0
+    elif month in [12, 1, 2]:
+        return 12.0 if city in north else 24.0
+    elif month in [7, 8, 9]:
+        return 30.0 if city in north else 28.0
+    return 28.0
+
+
+def build_features(
+    hour: int, dow: int, weather: str, city: str,
+    holiday: str, distance_km: float, temp: float, month: int
 ) -> pd.DataFrame:
+    """Build feature vector matching trained model columns exactly."""
+    row = {col: 0 for col in feature_cols}
 
-    hour       = now.hour
-    weekday    = now.weekday()          # 0=Mon, 6=Sun
-    is_weekend = 1 if weekday >= 5 else 0
-    is_peak    = 1 if hour in range(7, 10) or hour in range(17, 20) else 0
-    city       = _detect_city(source, destination)
+    row["hour"]                  = hour
+    row["day_of_week"]           = dow
+    row["is_weekend"]            = 1 if dow >= 5 else 0
+    row["is_peak_hour"]          = 1 if (8 <= hour <= 10 or 18 <= hour <= 20) else 0
+    row["temp_cel"]              = temp
+    row["distance_km"]           = distance_km
+    row["month"]                 = month
+    row["year"]                  = datetime.now().year
+    row["day"]                   = datetime.now().day
+    row["minute"]                = 0
+    row["rain_1h"]               = 5.0 if weather in ["Rain","Thunderstorm","Drizzle"] else 0.0
+    row["snow_1h"]               = 0.0
+    row["clouds_all"]            = 85 if weather in ["Clouds","Rain","Thunderstorm"] else 15
+    row["signal_count"]          = 14 if city in ["Delhi","Mumbai","Bangalore"] else 8
+    row["traffic_noise_factor"]  = 1.2 if city in ["Delhi","Mumbai","Bangalore","Kolkata"] else 1.0
 
-    row = {
-        # ── Core numeric ──────────────────────────────────
-        "rain_1h"              : rain_1h,
-        "snow_1h"              : snow_1h,
-        "clouds_all"           : clouds_all,
-        "hour"                 : hour,
-        "day_of_week"          : weekday,
-        "is_peak_hour"         : is_peak,
-        "is_weekend"           : is_weekend,
-        "signal_count"         : 8,        # reasonable urban default
-        "traffic_noise_factor" : 0.5,      # midpoint default
-        "year"                 : now.year,
-        "month"                : now.month,
-        "day"                  : now.day,
-        "minute"               : now.minute,
-        "temp_cel"             : temp_cel,
+    # One-hot: weather
+    wkey = f"weather_{weather}"
+    if wkey in row:
+        row[wkey] = 1
+    elif "weather_Clear" in row:
+        row["weather_Clear"] = 1
 
-        # ── Holiday one-hot ───────────────────────────────
-        **{f"holiday_{h}": (1 if h == holiday else 0) for h in ALL_HOLIDAYS},
+    # One-hot: city
+    ckey = f"city_{city}"
+    if ckey in row:
+        row[ckey] = 1
+    elif "city_Delhi" in row:
+        row["city_Delhi"] = 1
 
-        # ── Weather one-hot ───────────────────────────────
-        **{f"weather_main_{w}": (1 if w == weather else 0) for w in ALL_WEATHER},
+    # One-hot: holiday
+    hkey = f"holiday_{holiday}"
+    if hkey in row:
+        row[hkey] = 1
+    elif "holiday_No Holiday" in row:
+        row["holiday_No Holiday"] = 1
 
-        # ── Vehicle density (default: medium urban) ───────
-        "vehicle_density_low"    : 0,
-        "vehicle_density_medium" : 1,
+    # One-hot: vehicle density (medium default)
+    if "vehicle_density_medium" in row:
+        row["vehicle_density_medium"] = 1
 
-        # ── Road type (default: highway between cities) ───
-        "road_type_highway" : 1,
-        "road_type_narrow"  : 0,
+    # One-hot: road type (city default)
+    if "road_type_city" in row:
+        row["road_type_city"] = 1
 
-        # ── City one-hot ──────────────────────────────────
-        **{f"city_{c}": (1 if c == city else 0) for c in ALL_CITIES},
-    }
-
-    df = pd.DataFrame([row])
-
-    # Reindex to EXACTLY match training column order
-    # fill_value=0 handles any column in pkl not set above (safe default)
-    df = df.reindex(columns=_columns, fill_value=0)
-
-    return df
+    return pd.DataFrame([row])[feature_cols]
 
 
-# ─────────────────────────────────────────────────────────────
-# MAIN PREDICT FUNCTION
-# ─────────────────────────────────────────────────────────────
-
-def predict(
+def predict_traffic(
     source:      str,
     destination: str,
-    weather:     str   = "Clouds",
-    holiday:     str   = "No Holiday",
-    temp_cel:    float = 25.0,
+    hour:        Optional[int]   = None,
+    day_of_week: Optional[int]   = None,
+    weather:     Optional[str]   = "Clear",
+    holiday:     Optional[str]   = None,
+    distance_km: Optional[float] = None,
+    temp_cel:    Optional[float] = None,
 ) -> dict:
+    """
+    Main prediction function called from main.py
+    Returns best_route dict matching original response shape.
+    """
+    now   = datetime.now()
+    hour  = hour        if hour        is not None else now.hour
+    dow   = day_of_week if day_of_week is not None else now.weekday()
+    month = now.month
 
-    now      = datetime.now()
-    distance = estimate_distance(source, destination)
+    # Map inputs
+    city    = map_city(source)
+    weather = map_weather(weather or "Clear")
+    temp    = temp_cel if temp_cel else get_season_temp(month, city)
 
-    features = _build_features(
-        now         = now,
-        source      = source,
-        destination = destination,
-        weather     = weather,
-        holiday     = holiday,
-        temp_cel    = temp_cel,
-        # Adjust rain/snow/clouds based on weather
-        rain_1h     = 2.5 if weather in ("Rain", "Drizzle", "Thunderstorm") else 0.0,
-        snow_1h     = 1.0 if weather == "Snow" else 0.0,
-        clouds_all  = 80.0 if weather in ("Clouds", "Fog", "Haze", "Mist", "Smoke") else 20.0,
+    # Auto-fetch distance if not provided
+    if not distance_km or distance_km <= 0:
+        logger.info("Fetching road distance: %s → %s", source, destination)
+        distance_km = get_osrm_distance(source, destination) or 30.0
+    distance_km = round(distance_km, 1)
+
+    # Detect Indian holiday
+    if not holiday or holiday == "No Holiday":
+        holiday = INDIAN_HOLIDAYS.get((month, now.day), "No Holiday")
+        # Festival season boost
+        if month in FESTIVAL_MONTHS and holiday == "No Holiday":
+            import random
+            if random.random() < 0.3:
+                holiday = "Diwali" if month == 11 else "Dussehra"
+
+    # Build features and predict
+    features      = build_features(hour, dow, weather, city, holiday, distance_km, temp, month)
+    pred_int      = int(model.predict(features)[0])
+    proba         = model.predict_proba(features)[0]
+    confidence    = round(float(max(proba)), 2)
+    traffic_label = label_from_int(pred_int)
+
+    # Duration estimate (base speed 50 km/h, adjusted by traffic)
+    base_duration = round((distance_km / 50) * 60, 1)
+    multiplier    = {"Low": 1.0, "Medium": 1.55, "High": 2.3}[traffic_label]
+    real_duration = round(base_duration * multiplier, 1)
+    delay         = round(real_duration - base_duration, 1)
+
+    logger.info(
+        "Result | %s→%s | city=%s | weather=%s | hour=%d | dow=%d | dist=%.1f km | %s (%.0f%%)",
+        source, destination, city, weather, hour, dow, distance_km, traffic_label, confidence * 100
     )
 
-    traffic_level = int(_model.predict(features)[0])
-    probabilities = _model.predict_proba(features)[0]
-    confidence    = float(probabilities[traffic_level])
-
-    speed         = AVG_SPEED_KMH[traffic_level]
-    free_flow_min = round((distance / 80.0) * 60, 1)
-    real_min      = round((distance / speed) * 60, 1)
-    delay_min     = round(max(real_min - free_flow_min, 0), 1)
-
     return {
-        "distance_km"       : distance,
-        "duration_min"      : free_flow_min,
-        "real_duration_min" : real_min,
-        "delay_min"         : delay_min,
-        "final_prediction"  : traffic_level,
-        "traffic_label"     : TRAFFIC_LABELS[traffic_level],
-        "confidence"        : round(confidence, 2),
-        "predicted_at"      : now.isoformat(),
-        "features_used"     : {
-            "hour"        : now.hour,
-            "day_of_week" : now.weekday(),
-            "is_peak_hour": 1 if now.hour in range(7,10) or now.hour in range(17,20) else 0,
-            "is_weekend"  : 1 if now.weekday() >= 5 else 0,
-            "weather"     : weather,
-            "holiday"     : holiday,
-            "temp_cel"    : temp_cel,
-            "distance_km" : distance,
-            "city"        : _detect_city(source, destination),
-        }
+        "distance_km":       distance_km,
+        "duration_min":      base_duration,
+        "real_duration_min": real_duration,
+        "delay_min":         delay,
+        "final_prediction":  pred_int,
+        "traffic_label":     traffic_label,
+        "confidence":        confidence,
+        "predicted_at":      now.isoformat(),
+        "features_used": {
+            "hour":        hour,
+            "day_of_week": dow,
+            "is_peak_hour": 1 if (8 <= hour <= 10 or 18 <= hour <= 20) else 0,
+            "is_weekend":  1 if dow >= 5 else 0,
+            "weather":     weather,
+            "holiday":     holiday,
+            "temp_cel":    temp,
+            "distance_km": distance_km,
+            "city":        city,
+        },
     }

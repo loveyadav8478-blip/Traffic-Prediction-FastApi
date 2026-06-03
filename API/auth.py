@@ -1,17 +1,18 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import datetime
 from fastapi import HTTPException, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 
-JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_SECRET     = os.getenv("JWT_SECRET")
 API_SECRET_KEY = os.getenv("API_SECRET_KEY")
-
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")  # No default — must be set
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")   # Now correctly loaded from .env
 
 TOKEN_EXPIRY_HOURS = 2
-
 security = HTTPBearer()
 
 
